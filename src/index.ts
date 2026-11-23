@@ -4,9 +4,15 @@ import { RosBridge, RosDisconnectedError, validateRosbridgeUrl } from './ros';
 const dashboardUrl = new URL('./dashboard.html', import.meta.url);
 
 export function createApp(bridge = new RosBridge()) {
-  const wsCleanups = new Map<string, { offStatus: () => void; subs: Map<string, () => void> }>();
+  const wsCleanups = new Map<
+    string,
+    { offStatus: () => void; offPublishers: () => void; subs: Map<string, () => void> }
+  >();
 
   return new Elysia()
+    .onStop(() => {
+      bridge.close();
+    })
     // ponytail: wildcard CORS (*); switch to an origin allowlist + Vary: Origin if exposed beyond a trusted LAN or if credentials are needed.
     .onRequest(({ request, set }) => {
       set.headers['access-control-allow-origin'] = '*';
@@ -57,17 +63,47 @@ export function createApp(bridge = new RosBridge()) {
     .post(
       '/api/topics/publish',
       ({ body }) => {
-        bridge.publish(body.topic, body.type, body.payload);
-        return { ok: true, topic: body.topic, type: body.type };
+        bridge.publish(body.topic, body.type, body.payload, {
+          frequency: body.frequency,
+          duration: body.duration,
+        });
+        return {
+          ok: true,
+          topic: body.topic,
+          type: body.type,
+          ...(body.frequency && body.frequency > 0
+            ? {
+                frequency: body.frequency,
+                ...(body.duration && body.duration > 0 ? { duration: body.duration } : {}),
+              }
+            : {}),
+        };
       },
       {
         body: t.Object({
           topic: t.String({ minLength: 1 }),
           type: t.String({ minLength: 1 }),
           payload: t.Record(t.String(), t.Unknown()),
+          frequency: t.Optional(t.Number({ minimum: 0 })),
+          duration: t.Optional(t.Number({ minimum: 0 })),
         }),
       },
     )
+    .post(
+      '/api/topics/publish/stop',
+      ({ body }) => {
+        const stopped = bridge.stopPublish(body?.topic);
+        return { ok: true, stopped };
+      },
+      {
+        body: t.Optional(
+          t.Object({
+            topic: t.Optional(t.String({ minLength: 1 })),
+          }),
+        ),
+      },
+    )
+    .get('/api/topics/publishers', () => ({ publishers: bridge.getActivePublishers() }))
     .get('/api/services', async ({ set }) => {
       try {
         return { services: await bridge.getServices() };
@@ -114,8 +150,12 @@ export function createApp(bridge = new RosBridge()) {
         const offStatus = bridge.onStatusChange((status) => {
           ws.send({ type: 'status', data: status });
         });
-        wsCleanups.set(ws.id, { offStatus, subs });
+        const offPublishers = bridge.onPublishersChange((publishers) => {
+          ws.send({ type: 'publishers', data: publishers });
+        });
+        wsCleanups.set(ws.id, { offStatus, offPublishers, subs });
         ws.send({ type: 'status', data: bridge.getStatus() });
+        ws.send({ type: 'publishers', data: bridge.getActivePublishers() });
       },
       message(ws, msg) {
         const state = wsCleanups.get(ws.id);
@@ -136,6 +176,7 @@ export function createApp(bridge = new RosBridge()) {
         const state = wsCleanups.get(ws.id);
         if (!state) return;
         state.offStatus();
+        state.offPublishers();
         for (const unsub of state.subs.values()) unsub();
         wsCleanups.delete(ws.id);
       },
@@ -147,4 +188,19 @@ if (import.meta.main) {
   const bridge = new RosBridge();
   const app = createApp(bridge).listen(port);
   console.log(`rest2ros listening on http://localhost:${app.server?.port} (rosbridge: ${bridge.getStatus().url})`);
+
+  let shuttingDown = false;
+  const shutdown = async () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    bridge.close();
+    try {
+      await app.stop(true);
+    } finally {
+      process.exit(0);
+    }
+  };
+  process.once('SIGINT', shutdown);
+  process.once('SIGTERM', shutdown);
+  process.once('beforeExit', () => bridge.close());
 }

@@ -18,6 +18,20 @@ interface SubscriptionEntry {
   handle?: Topic;
 }
 
+export interface ActivePublisher {
+  topic: string;
+  type: string;
+  frequency: number;
+  duration: number | null;
+  startedAt: number;
+  endsAt: number | null;
+}
+
+interface PublishTimer extends ActivePublisher {
+  interval: ReturnType<typeof setInterval>;
+  timeout?: ReturnType<typeof setTimeout>;
+}
+
 export class RosDisconnectedError extends Error {
   constructor(message = 'Not connected to rosbridge') {
     super(message);
@@ -46,8 +60,10 @@ export class RosBridge {
   private lastError: string | null = null;
   private ros!: Ros;
   private publishers = new Map<string, Topic>();
+  private publishTimers = new Map<string, PublishTimer>();
   private subscriptions = new Set<SubscriptionEntry>();
   private statusListeners = new Set<(status: RosStatus) => void>();
+  private publisherListeners = new Set<(publishers: ActivePublisher[]) => void>();
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private closed = false;
   private readonly transportFactory?: ITransportFactory;
@@ -74,6 +90,22 @@ export class RosBridge {
     return () => this.statusListeners.delete(listener);
   }
 
+  getActivePublishers(): ActivePublisher[] {
+    return Array.from(this.publishTimers.values(), ({ topic, type, frequency, duration, startedAt, endsAt }) => ({
+      topic,
+      type,
+      frequency,
+      duration,
+      startedAt,
+      endsAt,
+    }));
+  }
+
+  onPublishersChange(listener: (publishers: ActivePublisher[]) => void): () => void {
+    this.publisherListeners.add(listener);
+    return () => this.publisherListeners.delete(listener);
+  }
+
   connect(nextUrl?: string): RosStatus {
     if (nextUrl !== undefined) {
       this.url = validateRosbridgeUrl(nextUrl);
@@ -94,6 +126,7 @@ export class RosBridge {
 
     ros.on('close', () => {
       if (this.ros !== ros) return;
+      this.stopPublish();
       this.publishers.clear();
       this.emitStatus();
       if (!this.closed) this.scheduleReconnect(ros);
@@ -115,8 +148,15 @@ export class RosBridge {
     return this.getStatus();
   }
 
-  publish(topic: string, type: string, payload: Record<string, unknown>): void {
+  publish(
+    topic: string,
+    type: string,
+    payload: Record<string, unknown>,
+    options?: { frequency?: number; duration?: number },
+  ): void {
     this.requireConnected();
+    const hadTimer = this.removeTimer(topic);
+
     const existing = this.publishers.get(topic);
     if (existing && existing.messageType !== type) {
       existing.unadvertise();
@@ -128,6 +168,52 @@ export class RosBridge {
       this.publishers.set(topic, pub);
     }
     pub.publish(payload);
+
+    const frequency = options?.frequency ?? 0;
+    const duration = options?.duration ?? 0;
+    if (!Number.isFinite(frequency) || frequency <= 0) {
+      if (hadTimer) this.emitPublishers();
+      return;
+    }
+
+    const intervalMs = Math.max(1, 1000 / frequency);
+    const validDuration = Number.isFinite(duration) && duration > 0 ? duration : 0;
+    const startedAt = Date.now();
+    const endsAt = validDuration > 0 ? startedAt + validDuration * 1000 : null;
+    const ros = this.ros;
+
+    // ponytail: setInterval has a 1ms floor and minor drift under load; upgrade to an hrtime loop if strict deterministic ROS rate timing is needed.
+    const entry: PublishTimer = {
+      topic,
+      type,
+      frequency,
+      duration: validDuration > 0 ? validDuration : null,
+      startedAt,
+      endsAt,
+      interval: setInterval(() => {
+        if (
+          this.ros !== ros ||
+          !ros.isConnected ||
+          this.publishTimers.get(topic) !== entry ||
+          (endsAt !== null && Date.now() >= endsAt)
+        ) {
+          this.stopPublish(topic);
+          return;
+        }
+        pub.publish(payload);
+      }, intervalMs),
+    };
+
+    if (validDuration > 0) {
+      entry.timeout = setTimeout(() => {
+        if (this.publishTimers.get(topic) === entry) {
+          this.stopPublish(topic);
+        }
+      }, validDuration * 1000);
+    }
+
+    this.publishTimers.set(topic, entry);
+    this.emitPublishers();
   }
 
   subscribe(topic: string, type: string, onMessage: (msg: unknown) => void): () => void {
@@ -178,11 +264,23 @@ export class RosBridge {
     });
   }
 
+  stopPublish(topic?: string): string[] {
+    if (topic === undefined) {
+      const stopped = [...this.publishTimers.keys()];
+      for (const name of stopped) this.removeTimer(name);
+      if (stopped.length > 0) this.emitPublishers();
+      return stopped;
+    }
+    if (!this.removeTimer(topic)) return [];
+    this.emitPublishers();
+    return [topic];
+  }
+
   close(): void {
     this.closed = true;
     this.clearReconnect();
-    this.subscriptions.clear();
     this.teardownRos();
+    this.subscriptions.clear();
   }
 
   private requireConnected(): void {
@@ -223,6 +321,7 @@ export class RosBridge {
   }
 
   private teardownRos(): void {
+    this.stopPublish();
     for (const entry of this.subscriptions) {
       entry.handle?.unsubscribe(entry.onMessage);
       entry.handle = undefined;
@@ -251,10 +350,26 @@ export class RosBridge {
     }
   }
 
+  private removeTimer(topic: string): boolean {
+    const entry = this.publishTimers.get(topic);
+    if (!entry) return false;
+    clearInterval(entry.interval);
+    if (entry.timeout) clearTimeout(entry.timeout);
+    this.publishTimers.delete(topic);
+    return true;
+  }
+
   private emitStatus(): void {
     const status = this.getStatus();
     for (const listener of this.statusListeners) {
       listener(status);
+    }
+  }
+
+  private emitPublishers(): void {
+    const publishers = this.getActivePublishers();
+    for (const listener of this.publisherListeners) {
+      listener(publishers);
     }
   }
 }

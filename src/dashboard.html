@@ -81,12 +81,23 @@
           <input id="pub-topic" type="text" placeholder="/chatter" style="flex:1" required />
           <input id="pub-type" type="text" placeholder="std_msgs/String" style="flex:1" required />
         </div>
+        <div class="row">
+          <input id="pub-freq" type="number" min="0" step="any" placeholder="Frequency Hz (optional)" style="flex:1" />
+          <input id="pub-dur" type="number" min="0" step="any" placeholder="Duration s (optional)" style="flex:1" />
+        </div>
         <textarea id="pub-payload">{"data": "hello ros"}</textarea>
         <div class="row">
           <button type="submit">Publish</button>
+          <button type="button" id="pub-stop" class="danger">Stop</button>
           <span id="pub-status" class="muted"></span>
         </div>
       </form>
+
+      <h2 style="margin-top:8px;">
+        Active Publishers
+        <button id="stop-all-pubs" class="danger" type="button" disabled>Stop All</button>
+      </h2>
+      <div id="active-pubs" class="list"><div class="item muted">No active publishers</div></div>
 
       <h2 style="margin-top:8px;">
         Call Service
@@ -135,6 +146,8 @@
         if (msg.type === 'status') {
           updateStatus(msg.data);
           if (msg.data.connected && topicsCache.length === 0) loadTopics();
+        } else if (msg.type === 'publishers') {
+          renderActivePublishers(msg.data || []);
         } else if (msg.type === 'message') {
           const entry = activeSubs.get(msg.topic);
           if (!entry) return;
@@ -284,20 +297,108 @@
       const status = $('pub-status');
       try {
         const payload = JSON.parse($('pub-payload').value || '{}');
-        await api('/api/topics/publish', {
+        const body = {
+          topic: $('pub-topic').value.trim(),
+          type: $('pub-type').value.trim(),
+          payload,
+        };
+        const freqRaw = $('pub-freq').value.trim();
+        const durRaw = $('pub-dur').value.trim();
+        if (freqRaw !== '') body.frequency = Number(freqRaw);
+        if (durRaw !== '') body.duration = Number(durRaw);
+
+        const res = await api('/api/topics/publish', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            topic: $('pub-topic').value.trim(),
-            type: $('pub-type').value.trim(),
-            payload,
-          }),
+          body: JSON.stringify(body),
         });
         status.className = 'ok-text';
-        status.textContent = `Published at ${new Date().toLocaleTimeString()}`;
+        if (res.frequency && res.duration) {
+          status.textContent = `Publishing at ${res.frequency} Hz for ${res.duration}s`;
+        } else if (res.frequency) {
+          status.textContent = `Publishing at ${res.frequency} Hz (until next publish)`;
+        } else {
+          status.textContent = `Published at ${new Date().toLocaleTimeString()}`;
+        }
       } catch (err) {
         status.className = 'err';
         status.textContent = err.message;
+      }
+    };
+
+    $('pub-stop').onclick = async () => {
+      const status = $('pub-status');
+      try {
+        const topic = $('pub-topic').value.trim();
+        const res = await api('/api/topics/publish/stop', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(topic ? { topic } : {}),
+        });
+        status.className = res.stopped.length ? 'ok-text' : 'muted';
+        status.textContent = res.stopped.length
+          ? `Stopped ${res.stopped.join(', ')}`
+          : 'No active repeating publisher';
+      } catch (err) {
+        status.className = 'err';
+        status.textContent = err.message;
+      }
+    };
+
+    function renderActivePublishers(pubs) {
+      const list = $('active-pubs');
+      $('stop-all-pubs').disabled = pubs.length === 0;
+      if (pubs.length === 0) {
+        list.innerHTML = '<div class="item muted">No active publishers</div>';
+        return;
+      }
+      list.innerHTML = '';
+      for (const p of pubs) {
+        const row = document.createElement('div');
+        row.className = 'item';
+
+        const info = document.createElement('div');
+        info.className = 'meta';
+        const nameEl = document.createElement('div');
+        nameEl.className = 'topic-name';
+        nameEl.textContent = p.topic;
+        const metaEl = document.createElement('div');
+        metaEl.className = 'topic-type';
+        metaEl.textContent = `${p.type} • ${p.frequency} Hz • ${p.duration ? `${p.duration}s` : 'until stopped'}`;
+        info.append(nameEl, metaEl);
+
+        const stopBtn = document.createElement('button');
+        stopBtn.type = 'button';
+        stopBtn.className = 'danger';
+        stopBtn.textContent = 'Stop';
+        stopBtn.onclick = async () => {
+          try {
+            await api('/api/topics/publish/stop', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ topic: p.topic }),
+            });
+          } catch (err) {
+            $('pub-status').className = 'err';
+            $('pub-status').textContent = err.message;
+          }
+        };
+
+        row.append(info, stopBtn);
+        list.append(row);
+      }
+    }
+
+    $('stop-all-pubs').onclick = async () => {
+      try {
+        await api('/api/topics/publish/stop', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({}),
+        });
+      } catch (err) {
+        $('pub-status').className = 'err';
+        $('pub-status').textContent = err.message;
       }
     };
 
