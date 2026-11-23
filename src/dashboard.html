@@ -1,0 +1,352 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>rest2ros Dashboard</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --card: #1e293b;
+      --border: #334155;
+      --text: #e2e8f0;
+      --muted: #94a3b8;
+      --accent: #38bdf8;
+      --ok: #22c55e;
+      --err: #ef4444;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: system-ui, -apple-system, sans-serif; background: var(--bg); color: var(--text); line-height: 1.4; }
+    header { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between; padding: 14px 20px; border-bottom: 1px solid var(--border); background: #0b1220; }
+    h1 { margin: 0; font-size: 18px; display: flex; align-items: center; gap: 10px; }
+    .badge { font-size: 12px; padding: 3px 9px; border-radius: 999px; font-weight: 600; background: #3f1d1d; color: #fca5a5; }
+    .badge.ok { background: #143622; color: #86efac; }
+    .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    main { display: grid; grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); gap: 16px; padding: 16px 20px; max-width: 1440px; margin: 0 auto; }
+    section { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 14px; display: flex; flex-direction: column; gap: 12px; }
+    h2 { margin: 0; font-size: 15px; display: flex; justify-content: space-between; align-items: center; }
+    input, textarea, select, button { font: inherit; font-size: 13px; border-radius: 6px; border: 1px solid var(--border); background: #0f172a; color: var(--text); padding: 7px 10px; }
+    textarea { font-family: var(--mono); width: 100%; min-height: 90px; resize: vertical; }
+    button { cursor: pointer; background: #1d4ed8; border-color: #2563eb; font-weight: 600; }
+    button.secondary { background: #1e293b; border-color: var(--border); }
+    button.danger { background: #7f1d1d; border-color: #991b1b; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .list { max-height: 260px; overflow: auto; border: 1px solid var(--border); border-radius: 6px; }
+    .item { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 8px 10px; border-bottom: 1px solid var(--border); font-size: 13px; }
+    .item:last-child { border-bottom: none; }
+    .meta { min-width: 0; }
+    .topic-name { font-family: var(--mono); font-weight: 600; word-break: break-all; }
+    .topic-type { font-family: var(--mono); font-size: 11px; color: var(--muted); }
+    pre { margin: 0; padding: 8px; background: #0b1220; border: 1px solid var(--border); border-radius: 6px; font-family: var(--mono); font-size: 12px; overflow: auto; max-height: 180px; white-space: pre-wrap; word-break: break-word; }
+    .sub-card { border: 1px solid var(--border); border-radius: 6px; padding: 10px; background: #0f172a; display: flex; flex-direction: column; gap: 6px; }
+    .muted { color: var(--muted); font-size: 12px; }
+    .err { color: #fca5a5; font-size: 12px; }
+    .ok-text { color: #86efac; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>rest2ros <span id="conn-badge" class="badge">Disconnected</span></h1>
+    <form id="config-form" class="row">
+      <input id="ros-url" type="text" placeholder="ws://localhost:9090" size="28" required />
+      <button type="submit">Save &amp; Connect</button>
+      <button type="button" id="reconnect-btn" class="secondary">Reconnect</button>
+    </form>
+  </header>
+  <div id="global-err" class="err" style="padding: 6px 20px 0;"></div>
+
+  <main>
+    <section>
+      <h2>
+        Available Topics
+        <button id="refresh-topics" class="secondary" type="button">Refresh</button>
+      </h2>
+      <input id="topic-filter" type="text" placeholder="Filter topics..." />
+      <div id="topics-list" class="list"><div class="item muted">Click Refresh to load ROS topics</div></div>
+
+      <h2 style="margin-top:4px;">Monitor / Subscribe</h2>
+      <form id="sub-form" class="row">
+        <input id="sub-topic" type="text" placeholder="/chatter" style="flex:1" required />
+        <input id="sub-type" type="text" placeholder="std_msgs/String (optional)" style="flex:1" />
+        <button type="submit">Subscribe</button>
+      </form>
+      <div id="subs-container" style="display:flex;flex-direction:column;gap:8px;"></div>
+    </section>
+
+    <section>
+      <h2>Publish Topic</h2>
+      <form id="pub-form" style="display:flex;flex-direction:column;gap:8px;">
+        <div class="row">
+          <input id="pub-topic" type="text" placeholder="/chatter" style="flex:1" required />
+          <input id="pub-type" type="text" placeholder="std_msgs/String" style="flex:1" required />
+        </div>
+        <textarea id="pub-payload">{"data": "hello ros"}</textarea>
+        <div class="row">
+          <button type="submit">Publish</button>
+          <span id="pub-status" class="muted"></span>
+        </div>
+      </form>
+
+      <h2 style="margin-top:8px;">
+        Call Service
+        <button id="refresh-services" class="secondary" type="button">Refresh Services</button>
+      </h2>
+      <form id="srv-form" style="display:flex;flex-direction:column;gap:8px;">
+        <div class="row">
+          <input id="srv-name" list="services-datalist" type="text" placeholder="/rosapi/get_time" style="flex:1" required />
+          <datalist id="services-datalist"></datalist>
+          <input id="srv-type" type="text" placeholder="rosapi/GetTime" style="flex:1" required />
+        </div>
+        <textarea id="srv-req">{}</textarea>
+        <div class="row">
+          <button type="submit">Call Service</button>
+          <span id="srv-status" class="muted"></span>
+        </div>
+        <pre id="srv-res" hidden></pre>
+      </form>
+    </section>
+  </main>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const activeSubs = new Map();
+    let topicsCache = [];
+    let ws;
+
+    function updateStatus(s) {
+      const badge = $('conn-badge');
+      badge.textContent = s.connected ? 'Connected' : 'Disconnected';
+      badge.className = s.connected ? 'badge ok' : 'badge';
+      if (!$('ros-url').matches(':focus')) $('ros-url').value = s.url || '';
+      $('global-err').textContent = s.error ? 'rosbridge error: ' + s.error : '';
+    }
+
+    function connectWs() {
+      const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      ws = new WebSocket(`${proto}//${location.host}/ws`);
+      ws.onopen = () => {
+        for (const [topic, entry] of activeSubs) {
+          ws.send(JSON.stringify({ action: 'subscribe', topic, type: entry.type }));
+        }
+      };
+      ws.onmessage = (ev) => {
+        const msg = JSON.parse(ev.data);
+        if (msg.type === 'status') {
+          updateStatus(msg.data);
+          if (msg.data.connected && topicsCache.length === 0) loadTopics();
+        } else if (msg.type === 'message') {
+          const entry = activeSubs.get(msg.topic);
+          if (!entry) return;
+          entry.count += 1;
+          entry.pre.textContent = JSON.stringify(msg.data, null, 2);
+          entry.meta.textContent = `#${entry.count} • ${new Date(msg.ts).toLocaleTimeString()}`;
+        }
+      };
+      ws.onclose = () => setTimeout(connectWs, 2000);
+    }
+
+    async function api(path, opts) {
+      const res = await fetch(path, opts);
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || data.message || `HTTP ${res.status}`);
+      return data;
+    }
+
+    function renderTopics() {
+      const q = $('topic-filter').value.trim().toLowerCase();
+      const filtered = topicsCache.filter((t) => t.name.toLowerCase().includes(q) || t.type.toLowerCase().includes(q));
+      const list = $('topics-list');
+      if (filtered.length === 0) {
+        list.innerHTML = '<div class="item muted">No matching topics</div>';
+        return;
+      }
+      list.innerHTML = '';
+      for (const t of filtered) {
+        const row = document.createElement('div');
+        row.className = 'item';
+        const info = document.createElement('div');
+        info.className = 'meta';
+        info.innerHTML = `<div class="topic-name"></div><div class="topic-type"></div>`;
+        info.querySelector('.topic-name').textContent = t.name;
+        info.querySelector('.topic-type').textContent = t.type;
+
+        const actions = document.createElement('div');
+        actions.className = 'row';
+        const useBtn = document.createElement('button');
+        useBtn.type = 'button';
+        useBtn.className = 'secondary';
+        useBtn.textContent = 'Publish';
+        useBtn.onclick = () => { $('pub-topic').value = t.name; $('pub-type').value = t.type; };
+
+        const subBtn = document.createElement('button');
+        subBtn.type = 'button';
+        subBtn.textContent = activeSubs.has(t.name) ? 'Unsubscribe' : 'Subscribe';
+        if (activeSubs.has(t.name)) subBtn.className = 'danger';
+        subBtn.onclick = () => activeSubs.has(t.name) ? unsubscribe(t.name) : subscribe(t.name, t.type);
+
+        actions.append(useBtn, subBtn);
+        row.append(info, actions);
+        list.append(row);
+      }
+    }
+
+    async function loadTopics() {
+      try {
+        const data = await api('/api/topics');
+        topicsCache = data.topics || [];
+        renderTopics();
+      } catch (e) {
+        const list = $('topics-list');
+        list.innerHTML = '';
+        const err = document.createElement('div');
+        err.className = 'item err';
+        err.textContent = e.message;
+        list.append(err);
+      }
+    }
+
+    function subscribe(topic, type) {
+      if (!topic || activeSubs.has(topic)) return;
+      const card = document.createElement('div');
+      card.className = 'sub-card';
+      const head = document.createElement('div');
+      head.className = 'row';
+      head.style.justifyContent = 'space-between';
+
+      const title = document.createElement('span');
+      title.className = 'topic-name';
+      title.textContent = type ? `${topic} (${type})` : topic;
+
+      const right = document.createElement('div');
+      right.className = 'row';
+      const meta = document.createElement('span');
+      meta.className = 'muted';
+      meta.textContent = 'waiting...';
+      const unsubBtn = document.createElement('button');
+      unsubBtn.type = 'button';
+      unsubBtn.className = 'danger';
+      unsubBtn.textContent = 'Unsubscribe';
+      unsubBtn.onclick = () => unsubscribe(topic);
+
+      right.append(meta, unsubBtn);
+      head.append(title, right);
+      const pre = document.createElement('pre');
+      pre.textContent = 'No messages yet';
+      card.append(head, pre);
+      $('subs-container').prepend(card);
+
+      activeSubs.set(topic, { type: type || '', card, pre, meta, count: 0 });
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ action: 'subscribe', topic, type: type || '' }));
+      }
+      renderTopics();
+    }
+
+    function unsubscribe(topic) {
+      const entry = activeSubs.get(topic);
+      if (!entry) return;
+      entry.card.remove();
+      activeSubs.delete(topic);
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ action: 'unsubscribe', topic }));
+      }
+      renderTopics();
+    }
+
+    $('config-form').onsubmit = async (e) => {
+      e.preventDefault();
+      try {
+        updateStatus(await api('/api/config', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url: $('ros-url').value.trim() }),
+        }));
+      } catch (err) {
+        $('global-err').textContent = err.message;
+      }
+    };
+
+    $('reconnect-btn').onclick = async () => {
+      updateStatus(await api('/api/reconnect', { method: 'POST' }));
+    };
+
+    $('refresh-topics').onclick = loadTopics;
+    $('topic-filter').oninput = renderTopics;
+
+    $('sub-form').onsubmit = (e) => {
+      e.preventDefault();
+      subscribe($('sub-topic').value.trim(), $('sub-type').value.trim());
+    };
+
+    $('pub-form').onsubmit = async (e) => {
+      e.preventDefault();
+      const status = $('pub-status');
+      try {
+        const payload = JSON.parse($('pub-payload').value || '{}');
+        await api('/api/topics/publish', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            topic: $('pub-topic').value.trim(),
+            type: $('pub-type').value.trim(),
+            payload,
+          }),
+        });
+        status.className = 'ok-text';
+        status.textContent = `Published at ${new Date().toLocaleTimeString()}`;
+      } catch (err) {
+        status.className = 'err';
+        status.textContent = err.message;
+      }
+    };
+
+    $('refresh-services').onclick = async () => {
+      const status = $('srv-status');
+      try {
+        const data = await api('/api/services');
+        const dl = $('services-datalist');
+        dl.innerHTML = '';
+        for (const s of data.services || []) {
+          const opt = document.createElement('option');
+          opt.value = s;
+          dl.append(opt);
+        }
+        status.className = 'ok-text';
+        status.textContent = `Loaded ${(data.services || []).length} services`;
+      } catch (err) {
+        status.className = 'err';
+        status.textContent = err.message;
+      }
+    };
+
+    $('srv-form').onsubmit = async (e) => {
+      e.preventDefault();
+      const status = $('srv-status');
+      const resBox = $('srv-res');
+      try {
+        const request = JSON.parse($('srv-req').value || '{}');
+        const data = await api('/api/services/call', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            service: $('srv-name').value.trim(),
+            type: $('srv-type').value.trim(),
+            request,
+          }),
+        });
+        status.className = 'ok-text';
+        status.textContent = `Success at ${new Date().toLocaleTimeString()}`;
+        resBox.hidden = false;
+        resBox.textContent = JSON.stringify(data.response, null, 2);
+      } catch (err) {
+        status.className = 'err';
+        status.textContent = err.message;
+        resBox.hidden = true;
+      }
+    };
+
+    connectWs();
+  </script>
+</body>
+</html>
